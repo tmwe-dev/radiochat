@@ -17,6 +17,17 @@ export default defineConfig({
     cssCodeSplit: true,
     rollupOptions: {
       output: {
+        /**
+         * Split only external vendor packages.
+         *
+         * App-local modules are intentionally left to Rollup's dependency graph.
+         * Previous manual chunks for ai-core/audio/education/data-layer created
+         * cross-chunk cycles (ai-core -> audio/education -> ai-core) and caused
+         * runtime TDZ/blank-screen failures even when TypeScript and Vite builds
+         * succeeded. Letting Rollup co-locate application modules removes that
+         * artificial cycle without changing prompts, agent configuration, or the
+         * orchestrator implementation.
+         */
         manualChunks(id) {
           // Three.js — heavy 3D library, loaded only by carousel
           if (id.includes('node_modules/three')) return 'three';
@@ -30,14 +41,6 @@ export default defineConfig({
           if (id.includes('node_modules/mammoth') || id.includes('node_modules/pdf-parse') || id.includes('node_modules/xlsx')) return 'file-parsers';
           // GSAP animation
           if (id.includes('node_modules/gsap')) return 'gsap';
-          // AI/orchestration core — split heavy lib modules
-          if (id.includes('/lib/orchestrator') || id.includes('/lib/proxy') || id.includes('/lib/streaming') || id.includes('/lib/memory') || id.includes('/lib/convergence') || id.includes('/lib/prompts') || id.includes('/lib/promptSections')) return 'ai-core';
-          // TTS/Audio modules
-          if (id.includes('/lib/tts') || id.includes('/lib/audioAnalyzer') || id.includes('/lib/audioStorage') || id.includes('/lib/voiceSuggester') || id.includes('/lib/pronunciationAnalyzer')) return 'audio';
-          // Course/Education modules
-          if (id.includes('/lib/courseGenerator') || id.includes('/lib/courseCatalog') || id.includes('/lib/assessmentEngine') || id.includes('/lib/lessonContentGenerator') || id.includes('/lib/maestroEngine') || id.includes('/lib/educationAPI') || id.includes('/lib/studentProfile') || id.includes('/lib/lifeTutor')) return 'education';
-          // DB/Storage layer
-          if (id.includes('/lib/supabase') || id.includes('/lib/dbSync') || id.includes('/lib/dbValidation') || id.includes('/lib/storage') || id.includes('/lib/apiService')) return 'data-layer';
         },
       },
     },
