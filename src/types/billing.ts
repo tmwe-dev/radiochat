@@ -1,10 +1,7 @@
 /**
- * BarTalk v8 — Billing Types
- * Tipi per il sistema di fatturazione e subscription Stripe.
+ * Billing types. Client tiers intentionally map the production DB plans as:
+ * free -> free, base (€9.90) -> pro, pro (€24.90) -> unlimited.
  */
-
-// ── Subscription Tiers ─────────────────────────────────────────────
-
 export type SubscriptionTier = 'free' | 'pro' | 'unlimited';
 
 export type SubscriptionStatus =
@@ -14,13 +11,11 @@ export type SubscriptionStatus =
   | 'trialing'
   | 'incomplete';
 
-// ── Billing Status (dal backend /api/billing/status) ───────────────
-
 export interface UsageStats {
   messagesUsed: number;
-  messagesLimit: number | null; // null = unlimited
+  messagesLimit: number | null;
   limitPeriod: 'day' | 'month';
-  resetAt: string | null;       // ISO date
+  resetAt: string | null;
   costBreakdown: CostBreakdown[];
 }
 
@@ -38,14 +33,14 @@ export interface BillingStatus {
   usage: UsageStats;
 }
 
-// ── Pricing Tiers (client-side display) ────────────────────────────
-
 export interface PricingTier {
   id: SubscriptionTier;
   name: string;
-  priceMonthly: number;       // €
+  priceMonthly: number;
   messagesLimit: number | null;
   limitPeriod: 'day' | 'month';
+  /** Human-readable quota description when limits are multi-dimensional. */
+  usageLabel?: string;
   features: string[];
   highlighted?: boolean;
 }
@@ -55,12 +50,13 @@ export const PRICING_TIERS_DISPLAY: PricingTier[] = [
     id: 'free',
     name: 'Free',
     priceMonthly: 0,
-    messagesLimit: 10,
-    limitPeriod: 'day',
+    messagesLimit: null,
+    limitPeriod: 'month',
+    usageLabel: '5 conversazioni/mese · 20 messaggi per conversazione',
     features: [
-      '4 agenti AI',
-      '10 messaggi al giorno',
-      'Corsi base',
+      '2 agenti AI',
+      '5 conversazioni al mese',
+      '20 messaggi per conversazione',
       'Cronologia chat',
     ],
   },
@@ -68,15 +64,15 @@ export const PRICING_TIERS_DISPLAY: PricingTier[] = [
     id: 'pro',
     name: 'Pro',
     priceMonthly: 9.90,
-    messagesLimit: 200,
+    messagesLimit: null,
     limitPeriod: 'month',
+    usageLabel: '50 conversazioni/mese · 100 messaggi per conversazione',
     highlighted: true,
     features: [
-      'Tutto di Free, più:',
-      '200 messaggi al mese',
-      'Corsi illimitati',
-      'Priorità nelle risposte',
-      'Supporto email',
+      '3 agenti AI',
+      '50 conversazioni al mese',
+      '100 messaggi per conversazione',
+      'Voce abilitata',
     ],
   },
   {
@@ -85,17 +81,15 @@ export const PRICING_TIERS_DISPLAY: PricingTier[] = [
     priceMonthly: 24.90,
     messagesLimit: null,
     limitPeriod: 'month',
+    usageLabel: 'Conversazioni e messaggi illimitati',
     features: [
-      'Tutto di Pro, più:',
+      '3 agenti AI',
+      'Conversazioni illimitate',
       'Messaggi illimitati',
-      'Agenti custom',
-      'Export conversazioni',
-      'Supporto prioritario',
+      'Voce abilitata',
     ],
   },
 ];
-
-// ── Context Value ──────────────────────────────────────────────────
 
 export interface BillingContextValue {
   tier: SubscriptionTier;
@@ -105,6 +99,5 @@ export interface BillingContextValue {
   refreshStatus: () => Promise<void>;
   openCheckout: (tier: SubscriptionTier) => Promise<void>;
   openPortal: () => Promise<void>;
-  /** True se l'utente ha raggiunto il limite */
   isAtLimit: boolean;
 }
