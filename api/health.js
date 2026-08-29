@@ -1,7 +1,9 @@
-// Vercel Serverless Function: Health Check for BarTalk v8.0
-// GET /api/health — verifica stato sistema, DB, provider AI
+// BarTalk v8.2.6 — health endpoint
+// GET /api/health         -> cheap public liveness probe
+// GET /api/health?deep=1  -> authenticated dependency diagnostics
 
 import { createClient } from '@supabase/supabase-js';
+import { applyCors, getAuthenticatedUser } from './_lib/security.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -16,7 +18,7 @@ const PROVIDERS = {
     url: 'https://api.anthropic.com/v1/messages',
     keyEnv: 'ANTHROPIC_API_KEY',
     authHeader: (key) => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
-    // HEAD check — 405 means server is reachable
+    // A GET may return 405 even when the provider is healthy/reachable.
     expectStatus: [200, 405],
   },
   gemini: {
@@ -31,69 +33,74 @@ const PROVIDERS = {
 };
 
 async function checkDB() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-    return { status: 'skip', message: 'No DB credentials configured' };
-  }
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return { status: 'not_configured' };
+
   try {
-    const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+    const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
     const start = Date.now();
     const { error } = await sb.from('workspaces').select('id').limit(1);
     const latency = Date.now() - start;
-    if (error) return { status: 'error', message: error.message, latency };
-    return { status: 'ok', latency };
-  } catch (e) {
-    return { status: 'error', message: e.message };
+    return error ? { status: 'error', latency } : { status: 'ok', latency };
+  } catch {
+    return { status: 'error' };
   }
 }
 
 async function checkProvider(name) {
   const cfg = PROVIDERS[name];
   const key = process.env[cfg.keyEnv];
-  if (!key) return { status: 'no_key', message: `${cfg.keyEnv} not configured` };
+  if (!key) return { status: 'not_configured' };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6000);
 
   try {
     const start = Date.now();
     const url = cfg.urlFn ? cfg.urlFn(key) : cfg.url;
     const headers = cfg.authHeader ? cfg.authHeader(key) : {};
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
-    const res = await fetch(url, {
-      method: cfg.url ? 'GET' : 'GET',
-      headers,
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
+    const response = await fetch(url, { method: 'GET', headers, signal: controller.signal });
     const latency = Date.now() - start;
-    const expectedStatuses = cfg.expectStatus || [200];
-    const ok = expectedStatuses.includes(res.status) || res.ok;
-
+    const expected = cfg.expectStatus || [200];
     return {
-      status: ok ? 'ok' : 'degraded',
-      httpStatus: res.status,
+      status: response.ok || expected.includes(response.status) ? 'ok' : 'degraded',
+      httpStatus: response.status,
       latency,
     };
-  } catch (e) {
+  } catch (error) {
     return {
-      status: 'error',
-      message: e.name === 'AbortError' ? 'Timeout (8s)' : e.message,
+      status: error?.name === 'AbortError' ? 'timeout' : 'error',
     };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
 export default async function handler(req, res) {
-  // CORS open per monitoring
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-store');
-
-  if (req.method === 'OPTIONS') return res.status(204).end();
+  const corsAllowed = applyCors(req, res, 'GET, OPTIONS');
+  if (req.method === 'OPTIONS') return corsAllowed ? res.status(204).end() : res.status(403).end();
+  if (!corsAllowed) return res.status(403).json({ error: 'Origin not allowed' });
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const startTime = Date.now();
+  const deep = req.query?.deep === '1' || req.query?.deep === 'true';
 
-  // Esegui check in parallelo
-  const [db, openai, anthropic, gemini, groq] = await Promise.all([
+  // Public endpoint is deliberately minimal. It proves the deployment is alive
+  // without advertising which credentials/services are configured and without
+  // hitting every external provider on each monitoring request.
+  if (!deep) {
+    return res.status(200).json({
+      status: 'ok',
+      version: '8.2.6',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  const { user } = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const start = Date.now();
+  const [database, openai, anthropic, gemini, groq] = await Promise.all([
     checkDB(),
     checkProvider('openai'),
     checkProvider('anthropic'),
@@ -101,44 +108,17 @@ export default async function handler(req, res) {
     checkProvider('groq'),
   ]);
 
-  const checks = { db, openai, anthropic, gemini, groq };
+  const providers = { openai, anthropic, gemini, groq };
+  const statuses = [database.status, ...Object.values(providers).map((entry) => entry.status)];
+  const unhealthy = statuses.some((status) => status === 'error' || status === 'timeout');
+  const degraded = statuses.some((status) => status === 'degraded');
 
-  // Determina stato globale
-  const allStatuses = Object.values(checks).map(c => c.status);
-  const hasError = allStatuses.includes('error');
-  const hasDegraded = allStatuses.includes('degraded');
-  const allOk = allStatuses.every(s => s === 'ok' || s === 'skip' || s === 'no_key');
-
-  let overallStatus = 'healthy';
-  let httpCode = 200;
-  if (hasError) { overallStatus = 'unhealthy'; httpCode = 503; }
-  else if (hasDegraded) { overallStatus = 'degraded'; httpCode = 200; }
-
-  // Conta provider funzionanti
-  const workingProviders = ['openai', 'anthropic', 'gemini', 'groq']
-    .filter(p => checks[p].status === 'ok').length;
-
-  return res.status(httpCode).json({
-    status: overallStatus,
-    version: '8.1.0',
+  return res.status(unhealthy ? 503 : 200).json({
+    status: unhealthy ? 'unhealthy' : degraded ? 'degraded' : 'healthy',
+    version: '8.2.6',
     timestamp: new Date().toISOString(),
-    uptime: `${Math.round(process.uptime())}s`,
-    node: process.version,
-    totalLatency: Date.now() - startTime,
-    providers: {
-      total: 4,
-      working: workingProviders,
-      details: { openai, anthropic, gemini, groq },
-    },
-    database: db,
-    envVars: {
-      SUPABASE_URL: !!SUPABASE_URL,
-      ENCRYPTION_KEY: !!process.env.ENCRYPTION_KEY,
-      OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-      ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
-      GOOGLE_API_KEY: !!process.env.GOOGLE_API_KEY,
-      GROQ_API_KEY: !!process.env.GROQ_API_KEY,
-      ELEVENLABS_API_KEY: !!process.env.ELEVENLABS_API_KEY,
-    },
+    totalLatency: Date.now() - start,
+    database,
+    providers,
   });
 }
