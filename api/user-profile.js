@@ -1,72 +1,71 @@
-/**
- * BarTalk v8.2 — User Profile API
- * GET: recupera profilo utente
- * PUT: aggiorna profilo utente
- */
+import { applyCors, getAuthenticatedUser, getSupabaseAdmin } from './_lib/security.js';
 
-import { createClient } from '@supabase/supabase-js';
-
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-function getSupabase() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-}
-
-async function getUserFromToken(req) {
-  const auth = req.headers.authorization;
-  if (!auth?.startsWith('Bearer ')) return null;
-  const token = auth.slice(7);
-  const sb = getSupabase();
-  if (!sb) return null;
-  const { data: { user }, error } = await sb.auth.getUser(token);
-  if (error || !user) return null;
-  return user;
-}
+const ALLOWED_LANG_RE = /^[A-Za-z]{2,3}([_-][A-Za-z]{2,4})?$/;
 
 export default async function handler(req, res) {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  const corsAllowed = applyCors(req, res, 'GET, PUT, OPTIONS');
+  if (req.method === 'OPTIONS') return res.status(corsAllowed ? 204 : 403).end();
+  if (!corsAllowed) return res.status(403).json({ error: 'Origin not allowed' });
 
-  const user = await getUserFromToken(req);
+  const { user } = await getAuthenticatedUser(req);
   if (!user) return res.status(401).json({ error: 'Non autenticato' });
 
-  const sb = getSupabase();
-  if (!sb) return res.status(500).json({ error: 'Supabase non configurato' });
+  const sb = getSupabaseAdmin();
+  if (!sb) return res.status(503).json({ error: 'Supabase non configurato' });
 
   if (req.method === 'GET') {
     const { data, error } = await sb
       .from('user_profiles')
-      .select('*')
+      .select('id, email, display_name, access_mode, subscription_plan, onboarding_completed, language, created_at, updated_at')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
 
-    if (error) return res.status(404).json({ error: 'Profilo non trovato' });
+    if (error) return res.status(500).json({ error: 'Errore lettura profilo' });
+    if (!data) return res.status(404).json({ error: 'Profilo non trovato' });
     return res.status(200).json(data);
   }
 
   if (req.method === 'PUT') {
-    const { display_name, language, preferences, onboarding_completed, plan } = req.body || {};
-
+    const { display_name, language, onboarding_completed } = req.body || {};
     const updates = {};
-    if (display_name !== undefined) updates.display_name = display_name;
-    if (language !== undefined) updates.language = language;
-    if (preferences !== undefined) updates.preferences = preferences;
-    if (onboarding_completed !== undefined) updates.onboarding_completed = onboarding_completed;
-    if (plan !== undefined) updates.plan = plan;
+
+    if (display_name !== undefined) {
+      if (typeof display_name !== 'string' || display_name.trim().length > 120) {
+        return res.status(400).json({ error: 'display_name non valido' });
+      }
+      updates.display_name = display_name.trim();
+    }
+
+    if (language !== undefined) {
+      if (typeof language !== 'string' || !ALLOWED_LANG_RE.test(language)) {
+        return res.status(400).json({ error: 'language non valida' });
+      }
+      updates.language = language;
+    }
+
+    if (onboarding_completed !== undefined) {
+      if (typeof onboarding_completed !== 'boolean') {
+        return res.status(400).json({ error: 'onboarding_completed deve essere boolean' });
+      }
+      updates.onboarding_completed = onboarding_completed;
+    }
+
+    // access_mode/subscription_plan are deliberately server-managed billing fields.
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Nessun campo aggiornabile fornito' });
+    }
 
     const { data, error } = await sb
       .from('user_profiles')
       .update(updates)
       .eq('id', user.id)
-      .select()
+      .select('id, email, display_name, access_mode, subscription_plan, onboarding_completed, language, created_at, updated_at')
       .single();
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+      console.error('[user-profile] Update error:', error.message);
+      return res.status(500).json({ error: 'Errore aggiornamento profilo' });
+    }
     return res.status(200).json(data);
   }
 
