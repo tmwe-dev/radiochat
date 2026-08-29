@@ -1,8 +1,4 @@
-/**
- * BarTalk v8 — Pricing Cards
- * Card comparativo dei piani di abbonamento.
- */
-
+/** Billing plan cards. */
 import { PRICING_TIERS_DISPLAY, type SubscriptionTier } from '../../types/billing';
 import { useBillingContext } from '../../context/BillingContext';
 
@@ -23,7 +19,7 @@ export function PricingCards({ onSelect, compact }: PricingCardsProps) {
     try {
       await openCheckout(tier);
     } catch {
-      // Error already set in context
+      // BillingContext exposes the user-facing error.
     }
   };
 
@@ -40,36 +36,27 @@ export function PricingCards({ onSelect, compact }: PricingCardsProps) {
             key={plan.id}
             className={`pricing-card ${plan.highlighted ? 'pricing-card--highlighted' : ''} ${isCurrent ? 'pricing-card--current' : ''}`}
           >
-            {plan.highlighted && (
-              <div className="pricing-card__badge">Consigliato</div>
-            )}
+            {plan.highlighted && <div className="pricing-card__badge">Consigliato</div>}
             {isCurrent && (
-              <div className="pricing-card__badge pricing-card__badge--current">
-                Piano attuale
-              </div>
+              <div className="pricing-card__badge pricing-card__badge--current">Piano attuale</div>
             )}
 
             <h3 className="pricing-card__name">{plan.name}</h3>
-
             <div className="pricing-card__price">
               <span className="pricing-card__amount">
                 {plan.priceMonthly === 0 ? 'Gratis' : `€${plan.priceMonthly.toFixed(2)}`}
               </span>
-              {plan.priceMonthly > 0 && (
-                <span className="pricing-card__period">al mese</span>
-              )}
+              {plan.priceMonthly > 0 && <span className="pricing-card__period">al mese</span>}
             </div>
 
             <div className="pricing-card__limit">
-              {plan.messagesLimit === null
+              {plan.usageLabel || (plan.messagesLimit === null
                 ? 'Messaggi illimitati'
-                : `${plan.messagesLimit} messaggi/${plan.limitPeriod === 'day' ? 'giorno' : 'mese'}`}
+                : `${plan.messagesLimit} messaggi/${plan.limitPeriod === 'day' ? 'giorno' : 'mese'}`)}
             </div>
 
             <ul className="pricing-card__features">
-              {plan.features.map((f, i) => (
-                <li key={i}>{f}</li>
-              ))}
+              {plan.features.map((feature, index) => <li key={index}>{feature}</li>)}
             </ul>
 
             <button
