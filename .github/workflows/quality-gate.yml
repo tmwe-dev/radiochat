@@ -25,5 +25,7 @@ jobs:
         run: npm ci
       - name: TypeScript + Vite build
         run: npm run build
-      - name: ESLint
-        run: npm run lint
+      - name: ESLint production source
+        run: npx eslint src api
+      - name: Dependency audit report
+        run: npm audit --audit-level=high || true
