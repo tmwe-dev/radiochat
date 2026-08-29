@@ -1,61 +1,43 @@
 /**
  * @module billingAPI
- * Billing API client for Stripe integration.
- * Handles subscription status checks, Stripe Checkout session creation,
- * and Stripe Customer Portal access for subscription management.
+ * Billing client for the single Vercel function /api/billing.
  */
-
 import type { BillingStatus, SubscriptionTier } from '../types/billing';
 import { buildAuthHeadersAsync } from './authToken';
 
 const API_BASE = '/api/billing';
 
-/**
- * Recupera lo stato attuale dell'abbonamento e dell'usage.
- */
+async function readError(res: Response, fallback: string): Promise<never> {
+  const payload = await res.json().catch(() => ({ error: fallback }));
+  throw new Error(payload?.error || `${fallback} (${res.status})`);
+}
+
 export async function getSubscriptionStatus(): Promise<BillingStatus> {
   const headers = await buildAuthHeadersAsync();
-  const res = await fetch(`${API_BASE}/status`, { method: 'POST', headers });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Network error' }));
-    throw new Error(err.error || `Status ${res.status}`);
-  }
+  const res = await fetch(`${API_BASE}?action=status`, { method: 'GET', headers });
+  if (!res.ok) return readError(res, 'Errore stato abbonamento');
   return res.json();
 }
 
-/**
- * Crea una sessione Stripe Checkout per un upgrade.
- * @returns URL della pagina di checkout Stripe
- */
 export async function createCheckoutSession(tier: SubscriptionTier): Promise<string> {
+  if (tier === 'free') throw new Error('Il piano Free non richiede checkout');
   const headers = await buildAuthHeadersAsync();
-  const res = await fetch(`${API_BASE}/checkout`, {
+  const res = await fetch(`${API_BASE}?action=checkout`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ tier }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Network error' }));
-    throw new Error(err.error || `Checkout error ${res.status}`);
-  }
+  if (!res.ok) return readError(res, 'Errore checkout');
   const data = await res.json();
-  return data.sessionUrl;
+  if (!data?.url) throw new Error('Stripe non ha restituito un URL checkout');
+  return data.url;
 }
 
-/**
- * Ottiene URL del portale clienti Stripe per gestire l'abbonamento.
- * @returns URL del Customer Portal
- */
 export async function getPortalUrl(): Promise<string> {
   const headers = await buildAuthHeadersAsync();
-  const res = await fetch(`${API_BASE}/portal`, {
-    method: 'POST',
-    headers,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Network error' }));
-    throw new Error(err.error || `Portal error ${res.status}`);
-  }
+  const res = await fetch(`${API_BASE}?action=portal`, { method: 'POST', headers });
+  if (!res.ok) return readError(res, 'Errore portale Stripe');
   const data = await res.json();
-  return data.portalUrl;
+  if (!data?.url) throw new Error('Stripe non ha restituito un URL portale');
+  return data.url;
 }
