@@ -1,39 +1,80 @@
 /**
- * BarTalk v8.2 — File Parse API
- * POST /api/parse-file
- * Riceve un file (base64) e restituisce il testo estratto.
+ * BarTalk v8.2.6 — authenticated file parsing API.
  *
- * Formati supportati:
- * - PDF (via pdf-parse)
- * - DOCX (via mammoth)
- * - XLSX/XLS (via xlsx/sheetjs)
- *
- * Body JSON:
- * { filename: string, data: string (base64), mimeType: string }
- *
- * Response:
- * { text: string, pages?: number, sheets?: string[] }
+ * The parser runs server-side because PDF/DOCX/XLSX libraries are too heavy
+ * for the browser bundle. File parsing is intentionally restricted to signed-in
+ * users: accepting arbitrary multi-megabyte documents from anonymous callers
+ * makes this endpoint an easy CPU/memory denial-of-service target.
  */
+
+import { applyCors, getAuthenticatedUser } from './_lib/security.js';
 
 export const config = {
   api: { bodyParser: { sizeLimit: '12mb' } },
 };
 
+const MAX_FILE_BYTES = 7 * 1024 * 1024;
+const MAX_EXCEL_BYTES = 3 * 1024 * 1024;
+const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx', 'xls']);
+
+function safeFilename(value) {
+  return String(value || 'file')
+    .replace(/[\r\n\0]/g, '')
+    .slice(0, 180);
+}
+
+function decodeBase64(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+
+  // Support both raw base64 and data:...;base64,... values.
+  const comma = value.indexOf(',');
+  const encoded = value.startsWith('data:') && comma >= 0 ? value.slice(comma + 1) : value;
+
+  // Reject obviously malformed input before Buffer.from's permissive decoder.
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 === 1) return null;
+
+  try {
+    const buffer = Buffer.from(encoded, 'base64');
+    return buffer.length > 0 ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  const corsAllowed = applyCors(req, res, 'POST, OPTIONS');
+  if (req.method === 'OPTIONS') return corsAllowed ? res.status(204).end() : res.status(403).end();
+  if (!corsAllowed) return res.status(403).json({ error: 'Origin not allowed' });
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
+  const { user } = await getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
   const { filename, data, mimeType } = req.body || {};
+  const cleanName = safeFilename(filename);
 
   if (!filename || !data) {
     return res.status(400).json({ error: 'filename e data (base64) richiesti' });
   }
 
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
-  const buffer = Buffer.from(data, 'base64');
+  const ext = cleanName.split('.').pop()?.toLowerCase() || '';
+  if (!ALLOWED_EXTENSIONS.has(ext)) {
+    return res.status(400).json({ error: `Formato non supportato: .${ext || '?'}` });
+  }
+
+  const buffer = decodeBase64(data);
+  if (!buffer) return res.status(400).json({ error: 'Dati file non validi' });
+
+  const maxBytes = ext === 'xlsx' || ext === 'xls' ? MAX_EXCEL_BYTES : MAX_FILE_BYTES;
+  if (buffer.length > maxBytes) {
+    return res.status(413).json({
+      error: `File troppo grande. Limite ${Math.floor(maxBytes / 1024 / 1024)} MB per .${ext}`,
+    });
+  }
+
+  // The MIME type is informative only; browsers/clients can spoof it. We keep
+  // it out of parser selection and use the validated extension instead.
+  void mimeType;
 
   try {
     switch (ext) {
@@ -57,20 +98,29 @@ export default async function handler(req, res) {
       case 'xlsx':
       case 'xls': {
         const XLSX = await import('xlsx');
-        const workbook = XLSX.read(buffer, { type: 'buffer' });
-        const sheets = workbook.SheetNames;
+        const workbook = XLSX.read(buffer, {
+          type: 'buffer',
+          cellFormula: false,
+          cellHTML: false,
+          cellStyles: false,
+          cellNF: false,
+        });
+        const sheets = workbook.SheetNames.slice(0, 100);
         const textParts = [];
 
         for (const sheetName of sheets) {
           const sheet = workbook.Sheets[sheetName];
+          if (!sheet) continue;
           const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false });
           if (csv.trim()) {
-            textParts.push(`--- Foglio: ${sheetName} ---\n${csv}`);
+            // Bound response size even for highly-compressible spreadsheets.
+            textParts.push(`--- Foglio: ${sheetName} ---\n${csv.slice(0, 500_000)}`);
           }
         }
 
+        const text = textParts.join('\n\n').slice(0, 2_000_000);
         return res.status(200).json({
-          text: textParts.join('\n\n') || '[Excel vuoto]',
+          text: text || '[Excel vuoto]',
           sheets,
         });
       }
@@ -79,9 +129,9 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: `Formato non supportato: .${ext}` });
     }
   } catch (err) {
-    console.error(`[parse-file] Errore parsing ${filename}:`, err.message);
-    return res.status(500).json({
-      error: `Errore parsing ${ext.toUpperCase()}: ${err.message}`,
+    console.error(`[parse-file] Errore parsing ${cleanName}:`, err instanceof Error ? err.message : String(err));
+    return res.status(422).json({
+      error: `Impossibile leggere il file ${ext.toUpperCase()}`,
     });
   }
 }
